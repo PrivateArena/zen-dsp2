@@ -3,7 +3,6 @@ package pwfilter
 import (
 	"log"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -11,34 +10,125 @@ import (
 func SetupRouting() {
 	time.Sleep(600 * time.Millisecond)
 
-	hwSink := findDefaultSinkPactl()
-	if hwSink == "" {
-		log.Printf("[rt] could not find default hardware sink")
-		return
-	}
-	log.Printf("[rt] hardware sink: %s", hwSink)
+	unloadAllVirtualSinks()
+	time.Sleep(200 * time.Millisecond)
 
-	vsinkID := createVirtualSink()
-	if vsinkID < 0 {
+	if !createVirtualSinkPactl() {
 		log.Printf("[rt] virtual sink creation failed")
 		return
 	}
-	log.Printf("[rt] virtual sink id: %d", vsinkID)
+	log.Printf("[rt] virtual sink 'zen-dsp-vsink' created")
 
 	time.Sleep(300 * time.Millisecond)
 
 	linkPorts("zen-dsp-vsink:monitor_FL", "zen-dsp-eq:Input_FL")
 	linkPorts("zen-dsp-vsink:monitor_FR", "zen-dsp-eq:Input_FR")
 
-	linkFilterToSink(hwSink)
+	setDefaultSink()
+	time.Sleep(200 * time.Millisecond)
 
-	setDefaultSink(vsinkID)
+	outputSink := findDefaultSinkName()
+	if outputSink == "" || strings.Contains(outputSink, "zen-dsp") {
+		log.Printf("[rt] default sink is vsink itself, scanning for hw sink")
+		outputSink = findHardwareSink()
+	}
+	log.Printf("[rt] output sink: %s", outputSink)
 
-	log.Printf("[rt] routing complete")
+	forceResumeSink(outputSink)
+	time.Sleep(300 * time.Millisecond)
+
+	linkFilterToSink(outputSink)
+
+	log.Printf("[rt] routing complete: apps -> vsink -> filter -> %s", outputSink)
 }
 
-func findDefaultSinkPactl() string {
-	out, err := exec.Command("pactl", "info").Output()
+func findHardwareSink() string {
+	raw, err := exec.Command("pactl", "list", "sinks").CombinedOutput()
+	if err != nil {
+		log.Printf("[rt] pactl list sinks failed: %v\n%s", err, string(raw))
+		return ""
+	}
+
+	var best string
+	var fallback string
+	blocks := strings.Split(string(raw), "\n\n")
+	for _, block := range blocks {
+		if !strings.Contains(block, "Name:") {
+			continue
+		}
+		lines := strings.Split(block, "\n")
+
+		var name, deviceAPI string
+		isVirtual := false
+		for _, l := range lines {
+			l = strings.TrimSpace(l)
+			if strings.HasPrefix(l, "Name:") {
+				name = strings.TrimSpace(l[5:])
+			}
+			if strings.HasPrefix(l, "device.api") {
+				parts := strings.SplitN(l, "=", 2)
+				if len(parts) == 2 {
+					deviceAPI = strings.Trim(strings.TrimSpace(parts[1]), "\"")
+				}
+			}
+			if strings.HasPrefix(l, "node.virtual") && strings.Contains(l, "true") {
+				isVirtual = true
+			}
+		}
+		if name == "" || isVirtual {
+			continue
+		}
+		if fallback == "" {
+			fallback = name
+		}
+		if deviceAPI == "alsa" && best == "" {
+			best = name
+		}
+	}
+	if best != "" {
+		log.Printf("[rt] using ALSA sink: %s", best)
+		return best
+	}
+	if fallback != "" {
+		log.Printf("[rt] using first non-virtual sink: %s", fallback)
+		return fallback
+	}
+	return ""
+}
+
+func unloadAllVirtualSinks() {
+	out, err := exec.Command("pactl", "list", "modules").CombinedOutput()
+	if err != nil {
+		log.Printf("[rt] pactl list modules failed: %v", err)
+		return
+	}
+	count := 0
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.Contains(l, "module-null-sink") && strings.Contains(l, "zen-dsp-vsink") {
+			parts := strings.SplitN(l, ":", 2)
+			if len(parts) == 2 {
+				moduleID := strings.TrimSpace(parts[0])
+				log.Printf("[rt] unloading vsink module %s", moduleID)
+				exec.Command("pactl", "unload-module", moduleID).Run()
+				count++
+			}
+		}
+	}
+	if count > 0 {
+		log.Printf("[rt] unloaded %d stale vsink(s)", count)
+	}
+}
+
+func forceResumeSink(name string) {
+	log.Printf("[rt] force-resuming sink: %s", name)
+	out, err := exec.Command("pactl", "suspend-sink", name, "0").CombinedOutput()
+	if err != nil {
+		log.Printf("[rt] suspend-sink resume failed: %v\n%s", err, string(out))
+	}
+}
+
+func findDefaultSinkName() string {
+	out, err := exec.Command("pactl", "info").CombinedOutput()
 	if err != nil {
 		return ""
 	}
@@ -50,35 +140,16 @@ func findDefaultSinkPactl() string {
 	return ""
 }
 
-func createVirtualSink() int {
-	// Method 1: pw-cli create-node with JSON
-	json := `{"factory.name":"support.null-audio-sink","node.name":"zen-dsp-vsink","node.description":"Zen DSP Virtual Sink","media.class":"Audio/Sink","audio.position":["FL","FR"]}`
-	out, err := exec.Command("pw-cli", "create-node", "adapter", json).CombinedOutput()
-	if err != nil {
-		log.Printf("[rt] create-node failed: %v\n%s", err, string(out))
-	} else {
-		idStr := strings.TrimSpace(string(out))
-		log.Printf("[rt] create-node output: %q", idStr)
-		if id, err := strconv.Atoi(idStr); err == nil {
-			return id
-		}
-	}
-
-	// Method 2: pactl load-module module-null-sink
-	log.Printf("[rt] trying pactl load-module module-null-sink")
-	out2, err := exec.Command("pactl", "load-module", "module-null-sink",
+func createVirtualSinkPactl() bool {
+	out, err := exec.Command("pactl", "load-module", "module-null-sink",
 		"sink_name=zen-dsp-vsink",
 		"sink_properties=node.description=Zen DSP Virtual Sink").CombinedOutput()
 	if err != nil {
-		log.Printf("[rt] pactl failed: %v\n%s", err, string(out2))
-		return -1
+		log.Printf("[rt] pactl load-module failed: %v\n%s", err, string(out))
+		return false
 	}
-	idStr := strings.TrimSpace(string(out2))
-	if id, err := strconv.Atoi(idStr); err == nil {
-		return id
-	}
-	log.Printf("[rt] pactl output non-numeric: %q", idStr)
-	return -1
+	log.Printf("[rt] pactl load-module output: %q", strings.TrimSpace(string(out)))
+	return true
 }
 
 func linkPorts(src, dst string) {
@@ -122,7 +193,7 @@ func linkFilterToSink(hwSink string) {
 	}
 }
 
-func setDefaultSink(id int) {
-	exec.Command("wpctl", "set-default", strconv.Itoa(id)).Run()
-	log.Printf("[rt] set zen-dsp-vsink (id=%d) as default sink", id)
+func setDefaultSink() {
+	exec.Command("pactl", "set-default-sink", "zen-dsp-vsink").Run()
+	log.Printf("[rt] default sink set to 'zen-dsp-vsink'")
 }
