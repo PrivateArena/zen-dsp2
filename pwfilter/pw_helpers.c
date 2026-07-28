@@ -172,85 +172,56 @@ struct pw_proxy *zen_create_sink(void) {
     return proxy;
 }
 
-// --- CREATE FILTER (with its own core, like pw_filter_new_simple does internally) ---
-
-// We keep the filter's context/core for its lifetime
-static struct pw_context *filter_ctx = NULL;
-static struct pw_core *filter_core = NULL;
+// --- CREATE FILTER (using pw_filter_new_simple, which connected before the rewrite) ---
 
 struct pw_filter *zen_create_filter(void) {
+    // Use pw_filter_new_simple which creates its own context/core internally
+    // Pass our loop for event integration
+    struct pw_loop *loop = pw_thread_loop_get_loop(pw.loop);
+
     struct pw_properties *props = pw_properties_new(
-        "node.name", "zen-dsp-eq",
-        "node.nick", "ZenDSP EQ",
-        "node.description", "ZenDSP Equalizer Filter",
         "media.type", "Audio",
         "media.category", "Filter",
         "media.role", "DSP",
-        "node.passive", "true",
+        "node.name", "zen-dsp-eq",
+        "node.description", "ZenDSPEqualizer",
         NULL
     );
 
-    pw_thread_loop_lock(pw.loop);
-    // Create a separate context/core for the filter (like pw_filter_new_simple)
-    filter_ctx = pw_context_new(pw_thread_loop_get_loop(pw.loop), NULL, 0);
-    filter_core = pw_context_connect(filter_ctx, NULL, 0);
-    if (!filter_core) { pw_properties_free(props); pw_thread_loop_unlock(pw.loop); return NULL; }
-
-    struct pw_filter *f = pw_filter_new(filter_core, "zen-dsp-eq", props);
+    struct pw_filter *f = pw_filter_new_simple(loop, "zen-dsp-eq",
+        props, &filter_events, NULL);
     pw_properties_free(props);
-    if (!f) { pw_thread_loop_unlock(pw.loop); return NULL; }
+    if (!f) return NULL;
 
-    // Add ports (like JamesDSP: format.dsp=32 bit float mono audio)
-    struct pw_properties *pin = pw_properties_new(
-        PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-        PW_KEY_PORT_NAME, "input_FL",
-        "audio.channel", "FL", NULL
-    );
+    struct pw_properties *pin, *pout;
+
+    pin = pw_properties_new("port.name", "input_FL", NULL);
     port_handles[0] = pw_filter_add_port(f, PW_DIRECTION_INPUT,
         PW_FILTER_PORT_FLAG_MAP_BUFFERS, 0, pin, NULL, 0);
     pw_properties_free(pin);
 
-    pin = pw_properties_new(
-        PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-        PW_KEY_PORT_NAME, "input_FR",
-        "audio.channel", "FR", NULL
-    );
+    pin = pw_properties_new("port.name", "input_FR", NULL);
     port_handles[1] = pw_filter_add_port(f, PW_DIRECTION_INPUT,
         PW_FILTER_PORT_FLAG_MAP_BUFFERS, 0, pin, NULL, 0);
     pw_properties_free(pin);
 
-    struct pw_properties *pout = pw_properties_new(
-        PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-        PW_KEY_PORT_NAME, "output_FL",
-        "audio.channel", "FL", NULL
-    );
+    pout = pw_properties_new("port.name", "output_FL", "audio.format", "F32", "audio.channels", "1", "audio.position", "FL", NULL);
     port_handles[2] = pw_filter_add_port(f, PW_DIRECTION_OUTPUT,
         PW_FILTER_PORT_FLAG_MAP_BUFFERS, 0, pout, NULL, 0);
     pw_properties_free(pout);
 
-    pout = pw_properties_new(
-        PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-        PW_KEY_PORT_NAME, "output_FR",
-        "audio.channel", "FR", NULL
-    );
+    pout = pw_properties_new("port.name", "output_FR", "audio.format", "F32", "audio.channels", "1", "audio.position", "FR", NULL);
     port_handles[3] = pw_filter_add_port(f, PW_DIRECTION_OUTPUT,
         PW_FILTER_PORT_FLAG_MAP_BUFFERS, 0, pout, NULL, 0);
     pw_properties_free(pout);
 
-    pw.filter = f;
-    pw_thread_loop_unlock(pw.loop);
     return f;
 }
 
 // Connect + add listener (JamesDSP pattern: connect first, then listener)
 int zen_connect_filter(struct pw_filter *f) {
-    pw_thread_loop_lock(pw.loop);
-    int ret = pw_filter_connect(f, 0, NULL, 0);
-    // Add listener AFTER connect (exactly like JamesDSP's initialize_listener)
-    pw_filter_add_listener(f, &filter_listener, &filter_events, NULL);
-    pw_core_sync(pw.core, PW_ID_CORE, 0);
-    pw_thread_loop_wait(pw.loop);
-    pw_thread_loop_unlock(pw.loop);
+    // Use the filter's own core context
+    int ret = pw_filter_connect(f, PW_FILTER_FLAG_RT_PROCESS, NULL, 0);
     return ret;
 }
 
