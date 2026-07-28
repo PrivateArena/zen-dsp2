@@ -13,7 +13,15 @@ import (
 	"github.com/jang/zen-dsp2/state"
 )
 
+/*
+#cgo pkg-config: libpipewire-0.3
+#include <pipewire/pipewire.h>
+*/
+import "C"
+
 func main() {
+	log.Printf("[pw] version=%s", C.GoString(C.pw_get_library_version()))
+
 	g := gui.New()
 
 	if cd, err := state.Load(); err == nil {
