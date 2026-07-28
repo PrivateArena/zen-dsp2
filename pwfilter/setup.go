@@ -4,7 +4,6 @@ package pwfilter
 #cgo pkg-config: libpipewire-0.3
 #include <pipewire/pipewire.h>
 #include <pipewire/filter.h>
-#include <spa/param/audio/format-utils.h>
 
 extern void goOnProcess(void *userdata, struct spa_io_position *position);
 extern void goOnStateChanged(void *userdata, enum pw_filter_state old,
@@ -25,7 +24,6 @@ const struct pw_filter_events filter_events = {
 };
 */
 import "C"
-
 import (
 	"fmt"
 	"unsafe"
@@ -47,12 +45,9 @@ func SetupFilter() error {
 		return fmt.Errorf("pw_main_loop_new failed")
 	}
 
-	ps := str("media.type=Audio,media.category=Filter,media.role=Production," +
-		"media.class=Audio/Sink," +
+	ps := str("media.type=Audio,media.category=Filter,media.role=DSP," +
 		"node.name=zen-dsp-eq,node.description=ZenDSPEqualizer," +
-		"node.autoconnect=true," +
-		"factory.name=filter-chain," +
-		"audio.position=FL,FR")
+		"node.passive=follow")
 	props := C.pw_properties_new_string(ps)
 	C.free(unsafe.Pointer(ps))
 	if props == nil {
@@ -76,7 +71,7 @@ func SetupFilter() error {
 
 	portLabels := []string{"FL", "FR"}
 	for c := range NumChannels {
-		ips := str("format.dsp=float32," +
+		ips := str("format.dsp=32 bit float mono audio," +
 			"port.name=Input_" + portLabels[c] + "," +
 			"audio.channels=1,audio.position=" + portLabels[c])
 		inProps := C.pw_properties_new_string(ips)
@@ -91,7 +86,7 @@ func SetupFilter() error {
 			return fmt.Errorf("pw_filter_add_port input %d failed", c)
 		}
 
-		ops := str("format.dsp=float32," +
+		ops := str("format.dsp=32 bit float mono audio," +
 			"port.name=Output_" + portLabels[c] + "," +
 			"audio.channels=1,audio.position=" + portLabels[c])
 		outProps := C.pw_properties_new_string(ops)
@@ -117,6 +112,8 @@ func SetupFilter() error {
 	fmt.Println("[eqd] PipeWire filter connected as 'zen-dsp-eq'")
 
 	go runMainLoop(ml)
+
+	go SetupRouting()
 
 	return nil
 }

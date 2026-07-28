@@ -12,6 +12,7 @@ extern void goOnStateChanged(void *userdata, enum pw_filter_state old,
 import "C"
 
 import (
+	"fmt"
 	"log"
 	"sync/atomic"
 	"unsafe"
@@ -81,6 +82,24 @@ func processAudio(inBufs, outBufs [NumChannels][]float32, n int) {
 }
 
 var processCount int
+var LastState string
+
+func filterStateName(s int) string {
+	switch s {
+	case 0:
+		return "error"
+	case 1:
+		return "unconnected"
+	case 2:
+		return "connecting"
+	case 3:
+		return "paused"
+	case 4:
+		return "streaming"
+	default:
+		return fmt.Sprintf("unknown(%d)", s)
+	}
+}
 
 //export goOnProcess
 func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
@@ -126,11 +145,18 @@ func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
 
 //export goOnStateChanged
 func goOnStateChanged(_ unsafe.Pointer, old, now C.enum_pw_filter_state, cerr *C.char) {
+	oldS := filterStateName(int(old))
+	newS := filterStateName(int(now))
+	LastState = newS
 	if now == C.PW_FILTER_STATE_ERROR {
+		errMsg := C.GoString(cerr)
+		log.Printf("[dsp] STATE: %s -> %s error=%s", oldS, newS, errMsg)
 		select {
-		case stateErrCh <- C.GoString(cerr):
+		case stateErrCh <- errMsg:
 		default:
 		}
+	} else {
+		log.Printf("[dsp] STATE: %s -> %s", oldS, newS)
 	}
 	select {
 	case stateChangeCh <- filterState{old: int(old), now: int(now)}:
