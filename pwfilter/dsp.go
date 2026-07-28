@@ -1,6 +1,9 @@
 package pwfilter
 
-import "math"
+import (
+	"log"
+	"math"
+)
 
 var DefaultFreqs = [NumBands]float64{
 	31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000,
@@ -39,5 +42,6 @@ func ComputeCoeffs(gainsDB [NumBands]float64, sampleRate float64, freqs [NumBand
 			A2: float32(a2 * invA0),
 		}
 	}
+	log.Printf("[eqd] coeffs: gains=%v rate=%.0f band0=%+v", gainsDB, sampleRate, c.Bands[0])
 	return c
 }

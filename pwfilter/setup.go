@@ -77,7 +77,7 @@ func SetupFilter() error {
 	portLabels := []string{"FL", "FR"}
 	for c := range NumChannels {
 		ips := str("format.dsp=float32," +
-			"port.name=Input " + portLabels[c] + "," +
+			"port.name=Input_" + portLabels[c] + "," +
 			"audio.channels=1,audio.position=" + portLabels[c])
 		inProps := C.pw_properties_new_string(ips)
 		C.free(unsafe.Pointer(ips))
@@ -92,7 +92,7 @@ func SetupFilter() error {
 		}
 
 		ops := str("format.dsp=float32," +
-			"port.name=Output " + portLabels[c] + "," +
+			"port.name=Output_" + portLabels[c] + "," +
 			"audio.channels=1,audio.position=" + portLabels[c])
 		outProps := C.pw_properties_new_string(ops)
 		C.free(unsafe.Pointer(ops))

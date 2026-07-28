@@ -12,6 +12,7 @@ extern void goOnStateChanged(void *userdata, enum pw_filter_state old,
 import "C"
 
 import (
+	"log"
 	"sync/atomic"
 	"unsafe"
 )
@@ -42,7 +43,26 @@ func processAudio(inBufs, outBufs [NumChannels][]float32, n int) {
 		for c := range NumChannels {
 			copy(outBufs[c], inBufs[c])
 		}
+		if processCount <= 20 {
+			log.Printf("[dsp] curve=nil BYPASS")
+		}
 		return
+	}
+
+	if processCount <= 20 {
+		peakIn := float32(0)
+		for c := range NumChannels {
+			for i := range n {
+				if v := inBufs[c][i]; v < 0 {
+					if -v > peakIn {
+						peakIn = -v
+					}
+				} else if v > peakIn {
+					peakIn = v
+				}
+			}
+		}
+		log.Printf("[dsp] curve=ACTIVE bands[0]=%+v peakIn=%.6f", curve.Bands[0], peakIn)
 	}
 
 	for i := range n {
@@ -60,6 +80,8 @@ func processAudio(inBufs, outBufs [NumChannels][]float32, n int) {
 	}
 }
 
+var processCount int
+
 //export goOnProcess
 func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
 	n := int(position.clock.duration)
@@ -67,16 +89,36 @@ func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
 		return
 	}
 
+	processCount++
+	if processCount <= 20 || processCount%1000 == 0 {
+		log.Printf("[dsp] goOnProcess #%d n=%d", processCount, n)
+	}
+
 	var inBufs, outBufs [NumChannels][]float32
+	allOK := true
 
 	for c := range NumChannels {
 		inPtr := C.pw_filter_get_dsp_buffer(inPorts[c], C.uint32_t(n))
 		outPtr := C.pw_filter_get_dsp_buffer(outPorts[c], C.uint32_t(n))
 		if inPtr == nil || outPtr == nil {
-			return
+			if processCount <= 20 {
+				log.Printf("[dsp] port %d nil ptr: in=%v out=%v", c, inPtr, outPtr)
+			}
+			allOK = false
+			continue
 		}
 		inBufs[c] = unsafe.Slice((*float32)(inPtr), n)
 		outBufs[c] = unsafe.Slice((*float32)(outPtr), n)
+	}
+
+	if !allOK {
+		// copy whatever we can for channels that have valid buffers
+		for c := range NumChannels {
+			if inBufs[c] != nil && outBufs[c] != nil {
+				copy(outBufs[c], inBufs[c])
+			}
+		}
+		return
 	}
 
 	processAudio(inBufs, outBufs, n)
