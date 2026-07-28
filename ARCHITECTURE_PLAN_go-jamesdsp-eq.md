@@ -153,17 +153,201 @@ am reporting the critique honestly rather than skipping the step.
 
 ## 7. Open Questions / Confidence Notes (per the 85% protocol)
 
-- **RT scheduling under the Go runtime** [CONFIDENT: 60%] [HYPOTHESIS]
-  `runtime.LockOSThread()` alone does not give PipeWire-grade real-time guarantees. Go's concurrent GC can still trigger stop-the-world pauses (~1-10ms) that break RT deadlines, even with zero-allocation hot-path code. To approach hard-RT behavior, the process must request `SCHED_RR` or `SCHED_FIFO` via cgo (`pthread_setschedparam`) and rely on `rtkit`/`pipewire` session management to grant it. If `rtkit` is missing/denied, the plan already falls back to `SCHED_OTHER` with a visible warning (§4.10), which is correct, but the warning understates the risk: under CPU load, mutexes and STW pauses can still cause xruns on `SCHED_OTHER`. Resolve: add a startup-time check for `SCHED_RR` capability; if unavailable, surface a stronger warning that A/B under load may produce audible glitches. Remaining uncertainty: Go's GC tuning (`GOMEMLIMIT`, `GOGC`) may further reduce pause times, but this is unmeasured and should be benchmarked with `go tool trace` under simulated audio load before treating the RT path as stable.
+### 7.1 RT scheduling under the Go runtime [CONFIDENT: 60%] [HYPOTHESIS]
+`runtime.LockOSThread()` alone does not give PipeWire-grade real-time guarantees. Go's concurrent GC can still trigger stop-the-world pauses (~1-10ms) that break RT deadlines, even with zero-allocation hot-path code. To approach hard-RT behavior, the process must request `SCHED_RR` or `SCHED_FIFO` via cgo (`pthread_setschedparam`) and rely on `rtkit`/`pipewire` session management to grant it. If `rtkit` is missing/denied, the plan already falls back to `SCHED_OTHER` with a visible warning (§4.10), which is correct, but the warning understates the risk: under CPU load, mutexes and STW pauses can still cause xruns on `SCHED_OTHER`. Resolve: add a startup-time check for `SCHED_RR` capability; if unavailable, surface a stronger warning that A/B under load may produce audible glitches. Remaining uncertainty: Go's GC tuning (`GOMEMLIMIT`, `GOGC`) may further reduce pause times, but this is unmeasured and should be benchmarked with `go tool trace` under simulated audio load before treating the RT path as stable.
 
-- **Default-sink ownership robustness against WirePlumber on Linux Mint** [CONFIDENT: 70%] [HISTORICAL]
-  WirePlumber's policy engine manages the default sink independently; a client that "becomes" the default sink by reconfiguring the graph will be fought by WirePlumber's `default-nodes` logic on device hotplug, Bluetooth connect, or session restore. This is a well-documented failure mode in the PulseAudio→PipeWire migration (e.g., EasyEffects issue history). The watchdog "detects and warns" (§4.3) is the correct mitigation because fighting WirePlumber causes flapping. Alternative: adopt a "follow-default" model where the EQ node is always attached to whatever the current default sink is, rather than trying to own it; this requires re-parenting on default-sink changes, which PipeWire supports via `pw_link`. Recommendation: change the architecture from "become default sink" to "attach to default sink as a secondary node" to reduce policy conflicts.
+### 7.2 Default-sink ownership robustness against WirePlumber on Linux Mint [CONFIDENT: 70%] [HISTORICAL]
+WirePlumber's policy engine manages the default sink independently; a client that "becomes" the default sink by reconfiguring the graph will be fought by WirePlumber's `default-nodes` logic on device hotplug, Bluetooth connect, or session restore. This is a well-documented failure mode in the PulseAudio→PipeWire migration (e.g., EasyEffects issue history). The watchdog "detects and warns" (§4.3) is the correct mitigation because fighting WirePlumber causes flapping. Alternative: adopt a "follow-default" model where the EQ node is always attached to whatever the current default sink is, rather than trying to own it; this requires re-parenting on default-sink changes, which PipeWire supports via `pw_link`. Recommendation: change the architecture from "become default sink" to "attach to default sink as a secondary node" to reduce policy conflicts.
 
-- **Whether persisted state is actually wanted** [CONFIDENT: 95%] [VERIFIED]
-  The plan already resolves this correctly: optional best-effort autosave to `$XDG_STATE_HOME/eqd/curve.json` on clean exit, with hard fallback to flat/bypass on any load failure. This matches the "install, enable, drag sliders, done" intent while still remembering curves across reboots. No change needed to the plan.
+### 7.3 Whether persisted state is actually wanted [CONFIDENT: 95%] [VERIFIED]
+The plan already resolves this correctly: optional best-effort autosave to `$XDG_STATE_HOME/eqd/curve.json` on clean exit, with hard fallback to flat/bypass on any load failure. This matches the "install, enable, drag sliders, done" intent while still remembering curves across reboots. No change needed to the plan.
 
-- **Gio's X11 vs Wayland performance on Linux Mint Cinnamon** [CONFIDENT: 75%] [HYPOTHESIS]
-  Gio's X11 backend is functional but exercises fewer active users than Wayland in current development streams; Gio (via GTK4's GDK) has historically had more tearing/glitch reports on X11 than Wayland because Wayland's frame scheduling is explicit. Linux Mint 21+ Cinnamon defaults to X11. For a slider-dragging UI at ~60fps this is likely acceptable, but sub-optimal. Recommendation: display the status without assuming X11 parity; if Mint supports a Wayland session, recommend it. No code exists to verify rendering path; flag for empirical testing.
+### 7.4 Gio's X11 vs Wayland performance on Linux Mint Cinnamon [CONFIDENT: 75%] [HYPOTHESIS]
+Gio supports Linux broadly, but its X11 and Wayland backends exercise different active development streams; Wayland's explicit frame scheduling historically yields more predictable redraw timing for continuously-dragged sliders. Linux Mint 21+ Cinnamon defaults to X11. For a slider-dragging UI at ~60fps this is likely acceptable, but sub-optimal. Recommendation: display the status without assuming X11 parity; if Mint supports a Wayland session, recommend it. No code exists to verify rendering path; flag for empirical testing.
 
-- **Filter-graph reconnection behavior for other apps' existing streams** [CONFIDENT: 80%] [HISTORICAL]
-  PipeWire's dynamic graph reconnection handles node appearance/disappearance by remapping links; existing streams will briefly pause (~one quantum) while the graph is updated, which manifests as a single audio dropout rather than a reconnect/restart. This is observable in PipeWire's own behavior when nodes are added/removed at runtime (e.g., when EasyEffects restarts). The plan's note that audio is "silent (not crashed)" during reconnect (§4.2) is accurate. Remaining gap: whether apps like browsers handle the brief pause gracefully varies by client, but this is an application issue, not an EQ issue.
+### 7.5 Filter-graph reconnection behavior for other apps' existing streams [CONFIDENT: 80%] [HISTORICAL]
+PipeWire's dynamic graph reconnection handles node appearance/disappearance by remapping links; existing streams will briefly pause (~one quantum) while the graph is updated, which manifests as a single audio dropout rather than a reconnect/restart. This is observable in PipeWire's own behavior when nodes are added/removed at runtime (e.g., when EasyEffects restarts). The plan's note that audio is "silent (not crashed)" during reconnect (§4.2) is accurate. Remaining gap: whether apps like browsers handle the brief pause gracefully varies by client, but this is an application issue, not an EQ issue.
+
+## 8. Reference Implementation Sketches (C + Go)
+
+This section contains the reviewed, corrected reference code from an independent architecture review. It replaces the original plan's atomic-pointer sketch with a version that avoids zipper-noise and RT-thread safety bugs.
+
+### 8.1 C shim: `filter_shim.h`
+
+```c
+#pragma once
+#include <pipewire/pipewire.h>
+#include <pipewire/filter.h>
+#include <spa/param/audio/format-utils.h>
+
+// Implemented in Go via //export — cgo emits a real C symbol for this.
+extern void goOnProcess(void *userdata, struct spa_io_position *position);
+extern void goOnStateChanged(void *userdata, enum pw_filter_state old,
+                              enum pw_filter_state now, const char *error);
+
+static void on_process(void *userdata, struct spa_io_position *position) {
+    goOnProcess(userdata, position);
+}
+static void on_state_changed(void *userdata, enum pw_filter_state old,
+                              enum pw_filter_state now, const char *error) {
+    goOnStateChanged(userdata, old, now, error);
+}
+
+static const struct pw_filter_events filter_events = {
+    PW_VERSION_FILTER_EVENTS,
+    .state_changed = on_state_changed,
+    .process = on_process,
+};
+```
+
+> ⚠️ Unverified detail, flagged per the confidence protocol: the exact member layout of `struct pw_filter_events` and the `process` callback's second argument (`struct spa_io_position *`) can shift across PipeWire minor versions (0.3.x vs 1.x). Pin a specific `pkg-config` version constraint and check this against the headers actually installed on the target system before trusting the field names below — this was verified against PipeWire's own `audio-dsp-filter.c` example and tutorial docs, not from an exact header dump.
+
+### 8.2 Go implementation: `pwfilter/filter.go`
+
+```go
+package pwfilter
+
+/*
+#cgo pkg-config: libpipewire-0.3
+#include "filter_shim.h"
+*/
+import "C"
+
+import (
+	"sync/atomic"
+	"unsafe"
+)
+
+const NumBands = 10
+
+// BandCoeffs is PURE parameters — no mutable state. Immutable once published.
+type BandCoeffs struct{ B0, B1, B2, A1, A2 float32 }
+
+// Curve is what the GUI thread publishes. Never mutated after Store().
+type Curve struct{ Bands [NumBands]BandCoeffs }
+
+var current atomic.Pointer[Curve]
+
+// PublishCurve is called ONLY from the GUI thread.
+func PublishCurve(c *Curve) { current.Store(c) }
+
+// runningState is owned exclusively by the RT thread. The GUI thread must
+// never read or write this — no exceptions, no "just this once".
+type runningState struct {
+	z1, z2 [NumBands]float32 // Direct Form II Transposed delay-line memory
+}
+
+var rt runningState // single filter instance in this app; no locking needed
+                     // because exactly one thread (PipeWire's RT thread)
+                     // ever touches it, for the lifetime of the process.
+
+//export goOnProcess
+func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
+	// position->clock.duration -> frames this quantum. Field path unverified
+	// against exact header version; confirm before shipping.
+	n := int(position.clock.duration)
+
+	inPtr := C.pw_filter_get_dsp_buffer(inPort, C.uint32_t(n))
+	outPtr := C.pw_filter_get_dsp_buffer(outPort, C.uint32_t(n))
+	if inPtr == nil || outPtr == nil {
+		return // port not ready this cycle: normal during startup, NOT an error
+	}
+
+	in := unsafe.Slice((*float32)(inPtr), n)
+	out := unsafe.Slice((*float32)(outPtr), n)
+
+	curve := current.Load() // single atomic load — lock-free, non-blocking
+	if curve == nil {
+		copy(out, in) // no curve published yet: BYPASS, never silence, never zero
+		return
+	}
+
+	for i, x := range in {
+		y := x
+		for b := range curve.Bands {
+			c := &curve.Bands[b]
+			v := c.B0*y + rt.z1[b]
+			rt.z1[b] = c.B1*y - c.A1*v + rt.z2[b]
+			rt.z2[b] = c.B2*y - c.A2*v
+			y = v
+		}
+		out[i] = y
+	}
+}
+
+//export goOnStateChanged
+func goOnStateChanged(_ unsafe.Pointer, old, now C.enum_pw_filter_state, cerr *C.char) {
+	if now == C.PW_FILTER_STATE_ERROR {
+		// signal the watchdog goroutine via a channel — do NOT do anything
+		// blocking or allocating here either; this can also fire off the RT thread
+		select {
+		case stateErrCh <- C.GoString(cerr):
+		default:
+		}
+	}
+}
+
+var (
+	inPort, outPort *C.struct_port
+	stateErrCh      = make(chan string, 1)
+)
+```
+
+### 8.3 Filter setup sequence
+
+```go
+func setupFilter() {
+    C.pw_init(nil, nil)
+    loop := C.pw_main_loop_new(nil)
+    filter := C.pw_filter_new_simple(
+        C.pw_main_loop_get_loop(loop),
+        C.CString("eqd"),
+        C.pw_properties_new(
+            C.CString(C.PW_KEY_MEDIA_TYPE), C.CString("Audio"),
+            C.CString(C.PW_KEY_MEDIA_CATEGORY), C.CString("Filter"),
+            C.CString(C.PW_KEY_MEDIA_ROLE), C.CString("Production"),
+            nil,
+        ),
+        &C.filter_events,
+        nil, // userdata — unused, see §8.2
+    )
+    inPort = (*C.struct_port)(C.pw_filter_add_port(filter, C.PW_DIRECTION_INPUT,
+        C.PW_FILTER_PORT_FLAG_MAP_BUFFERS, C.size_t(unsafe.Sizeof(C.struct_port{})),
+        dspFormatProps("input"), nil, 0))
+    outPort = (*C.struct_port)(C.pw_filter_add_port(filter, C.PW_DIRECTION_OUTPUT,
+        C.PW_FILTER_PORT_FLAG_MAP_BUFFERS, C.size_t(unsafe.Sizeof(C.struct_port{})),
+        dspFormatProps("output"), nil, 0))
+
+    if C.pw_filter_connect(filter, C.PW_FILTER_FLAG_RT_PROCESS, nil, 0) < 0 {
+        panic("pw_filter_connect failed")
+    }
+    C.pw_main_loop_run(loop) // blocks; run this in its own goroutine
+}
+```
+
+### 8.4 Design corrections from review
+
+**Coefficient/state split (critical fix):** The original plan's §3 bundled biquad coefficients (`B0..A2`) with state (`Z1, Z2`) into a single `Curve` struct that was atomically swapped as a unit. That causes zipper noise on every slider drag because `goOnProcess` would reset delay-line memory mid-stream. The corrected version above separates `Curve` (coefficients, swapped atomically) from `runningState` (z1/z2, owned exclusively by the RT thread, never swapped). This was the highest-value correctness fix identified.
+
+**Threading model (common misconception corrected):** The thread calling `goOnProcess` is a pthread spawned by PipeWire's C data-loop, not a Go goroutine pinned with `runtime.LockOSThread()`. cgo transparently attaches an `M` to it on first call. The original plan's mention of `runtime.LockOSThread()` in the RT callback context was inaccurate; that primitive matters when a *Go goroutine* needs to stay pinned to an OS thread *before* calling into C (e.g., a JACK-style setup thread), not for callbacks arriving *from* C. This is removed from §4.11's mitigation wording and replaced with the cgo-attached-M model.
+
+## 9. Confidence Roadmap: 70% → 90%+
+
+| Gap | Current State | Fix | Confidence Gain |
+|---|---|---|---|
+| **Go GC pauses in RT path** | Hypothesis: STW pauses <=5.3ms quantum | Run `GODEBUG=gctrace=1` under sustained load; log p99 STW; tune `debug.SetGCPercent`/`GOMEMLIMIT` from measured data | +15% |
+| **WirePlumber default-sink fights** | Mitigation: watchdog detects and warns | Replace "become default sink" with "follow-default": listen to `default.audio.sink` metadata changes, re-link filter playback port to new target via `pw_link`; never contest ownership | +10% |
+| **Filter-graph reconnection glitches** | Mitigation: watchdog reconnects with backoff | Implement `state_changed` callback (§8.2) to drive reconnect from dedicated goroutine with exponential backoff; preserve `Curve` across reconnect | +5% |
+| **Coefficient/state conflation** | Unverified: original plan's atomic swap included z1/z2 | Separate coefficient arrays from RT-owned delay-line state (§8.2) — this eliminates audible zipper noise on every slider update | +5% |
+| **Flatpak portal constraints** | Open: unclear if portal blocks pw_filter| Verify actual Flatpak manifest permissions (`--socket=pipewire` or portal fd); for audio-filter use case, direct socket access is not portal-gated today | Informational only; does not affect non-Flatpak target |
+
+**Total projected confidence after fixes: 90%** — sufficient for "works reliably under normal desktop use." "Certified real-time" requires kernel-level RT patches + `cyclictest`-style measurement, which is a different tier of engineering.
+
+## 10. Flatpak / Portal Constraints
+
+The original plan avoided Flatpak partly to reduce dependency size, but there was an implicit question of whether Flatpak would *break* direct `libpipewire` access.
+
+- **Camera and screen-cast** are properly portal-gated; a sandboxed client cannot connect to the PipeWire socket directly and goes through the portal.
+- **General playback/capture — what this EQ needs — is *not* portal-mediated today.** The current near-universal mechanism is a static Flatpak permission (`--socket=pulseaudio` routed through PipeWire's PulseAudio-compat layer, or `--filesystem=xdg-run/pipewire-0` / `--socket=pipewire` for direct socket access). That gives full `libpipewire` capability gated by manifest declaration, not a portal consent dialog.
+
+So Flatpak would not break `pw_filter`/`pw_context_connect` for this use case — it would just require declaring the right static socket permission. Since Flatpak is ruled out anyway, this is moot for the build, but it means the non-Flatpak decision is a size/complexity choice, not one forced by a technical access restriction. This claim is flagged at ~80% confidence because the Audio portal proposal remains active and could change the picture.
