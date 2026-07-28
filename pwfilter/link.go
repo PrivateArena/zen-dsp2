@@ -1,199 +1,179 @@
 package pwfilter
 
+/*
+#cgo pkg-config: libpipewire-0.3
+#include <pipewire/pipewire.h>
+*/
+import "C"
+
 import (
 	"log"
-	"os/exec"
 	"strings"
 	"time"
 )
 
+var sinkNodeID uint32
+var sinkNodeSerial uint64
+
 func SetupRouting() {
-	time.Sleep(600 * time.Millisecond)
+	time.Sleep(1 * time.Second)
 
-	unloadAllVirtualSinks()
-	time.Sleep(200 * time.Millisecond)
-
-	if !createVirtualSinkPactl() {
-		log.Printf("[rt] virtual sink creation failed")
+	// 1. Wait for our null sink (zen-dsp-sink)
+	waitForNode("zen-dsp-sink")
+	sink, ok := findNodeByName("zen-dsp-sink")
+	if !ok {
+		log.Printf("[rt] CRITICAL: zen-dsp-sink not found!")
 		return
 	}
-	log.Printf("[rt] virtual sink 'zen-dsp-vsink' created")
+	sinkNodeID = sink.id
+	sinkNodeSerial = sink.serial
+	log.Printf("[rt] found null sink: id=%d serial=%d", sinkNodeID, sinkNodeSerial)
 
-	time.Sleep(300 * time.Millisecond)
-
-	linkPorts("zen-dsp-vsink:monitor_FL", "zen-dsp-eq:Input_FL")
-	linkPorts("zen-dsp-vsink:monitor_FR", "zen-dsp-eq:Input_FR")
-
-	setDefaultSink()
-	time.Sleep(200 * time.Millisecond)
-
-	outputSink := findDefaultSinkName()
-	if outputSink == "" || strings.Contains(outputSink, "zen-dsp") {
-		log.Printf("[rt] default sink is vsink itself, scanning for hw sink")
-		outputSink = findHardwareSink()
+	// 2. Find hardware sink (prefer RUNNING via pactl, fallback to registry)
+	hwName := findHardwareSinkPactl()
+	if hwName == "" {
+		log.Printf("[rt] no hardware sink found via pactl, trying registry")
+		sinks := findNodesByClass("Audio/Sink")
+		for _, s := range sinks {
+			if s.name != "zen-dsp-sink" {
+				hwName = s.name
+				break
+			}
+		}
 	}
-	log.Printf("[rt] output sink: %s", outputSink)
+	if hwName == "" {
+		log.Printf("[rt] CRITICAL: no hardware sink found!")
+		return
+	}
+	log.Printf("[rt] hardware sink: %s", hwName)
 
-	forceResumeSink(outputSink)
+	// Wait for hw sink node to appear
+	waitForNode(hwName)
+	hw, ok := findNodeByName(hwName)
+	if !ok {
+		log.Printf("[rt] CRITICAL: hw sink %s not found in registry!", hwName)
+		return
+	}
+	log.Printf("[rt] found hw sink: id=%d serial=%d", hw.id, hw.serial)
+
+	// 3. Wait for filter node zen-dsp-eq
+	waitForNode("zen-dsp-eq")
+	filter, ok := findNodeByName("zen-dsp-eq")
+	if !ok {
+		log.Printf("[rt] CRITICAL: zen-dsp-eq not found!")
+		return
+	}
+	log.Printf("[rt] found filter: id=%d serial=%d", filter.id, filter.serial)
+
+	// 4. Link null_sink -> filter -> hw_sink (JamesDSP style)
+	log.Printf("[rt] linking %s(id=%d) -> %s(id=%d)", "zen-dsp-sink", sink.id, "zen-dsp-eq", filter.id)
 	time.Sleep(300 * time.Millisecond)
+	linkRet := int(C.zen_link_nodes_by_id(C.uint32_t(sink.id), C.uint32_t(filter.id)))
+	log.Printf("[rt] null_sink -> filter: %d links", linkRet)
 
-	linkFilterToSink(outputSink)
+	time.Sleep(500 * time.Millisecond)
 
-	log.Printf("[rt] routing complete: apps -> vsink -> filter -> %s", outputSink)
+	log.Printf("[rt] linking %s(id=%d) -> %s(id=%d)", "zen-dsp-eq", filter.id, hwName, hw.id)
+	linkRet = int(C.zen_link_nodes_by_id(C.uint32_t(filter.id), C.uint32_t(hw.id)))
+	log.Printf("[rt] filter -> hw_sink: %d links", linkRet)
+
+	// 5. Route output streams to null sink via metadata
+	// Monitor for new streams and route them
+	time.Sleep(500 * time.Millisecond)
+	go routeStreamsLoop()
 }
 
-func findHardwareSink() string {
-	raw, err := exec.Command("pactl", "list", "sinks").CombinedOutput()
+func waitForNode(name string) {
+	for i := 0; i < 200; i++ {
+		if _, ok := findNodeByName(name); ok {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	log.Printf("[rt] WARNING: node '%s' not found after 10s", name)
+}
+
+func routeStreamsLoop() {
+	// Periodically check for unrouted Output streams and route them to our sink
+	routed := make(map[uint32]bool)
+	for {
+		time.Sleep(2 * time.Second)
+
+		if int(C.zen_has_metadata()) == 0 {
+			continue
+		}
+
+		nodesMu.Lock()
+		var toRoute []nodeInfo
+		for _, n := range nodes {
+			if n.class == "Stream/Output/Audio" && !routed[n.id] {
+				toRoute = append(toRoute, n)
+			}
+		}
+		nodesMu.Unlock()
+
+		for _, n := range toRoute {
+			log.Printf("[rt] routing stream '%s'(id=%d serial=%d) -> zen-dsp-sink", n.name, n.id, n.serial)
+			ret := int(C.zen_set_stream_target(
+				C.uint32_t(n.id),
+				C.uint32_t(sinkNodeID),
+				C.uint64_t(sinkNodeSerial),
+			))
+			if ret == 0 {
+				routed[n.id] = true
+				log.Printf("[rt] stream %s routed to zen-dsp-sink", n.name)
+			} else {
+				log.Printf("[rt] failed to route stream %s", n.name)
+			}
+		}
+	}
+}
+
+func findHardwareSinkPactl() string {
+	out, err := run("pactl", "list", "sinks")
 	if err != nil {
-		log.Printf("[rt] pactl list sinks failed: %v\n%s", err, string(raw))
 		return ""
 	}
 
-	var best string
-	var fallback string
-	blocks := strings.Split(string(raw), "\n\n")
+	var running, idle, any string
+	blocks := strings.Split(out, "\n\n")
 	for _, block := range blocks {
 		if !strings.Contains(block, "Name:") {
 			continue
 		}
 		lines := strings.Split(block, "\n")
-
-		var name, deviceAPI string
+		var name, state string
 		isVirtual := false
 		for _, l := range lines {
 			l = strings.TrimSpace(l)
 			if strings.HasPrefix(l, "Name:") {
 				name = strings.TrimSpace(l[5:])
 			}
-			if strings.HasPrefix(l, "device.api") {
-				parts := strings.SplitN(l, "=", 2)
-				if len(parts) == 2 {
-					deviceAPI = strings.Trim(strings.TrimSpace(parts[1]), "\"")
-				}
+			if strings.HasPrefix(l, "State:") {
+				state = strings.TrimSpace(l[6:])
 			}
 			if strings.HasPrefix(l, "node.virtual") && strings.Contains(l, "true") {
 				isVirtual = true
 			}
 		}
-		if name == "" || isVirtual {
+		if name == "" || isVirtual || strings.Contains(name, "zen-dsp") {
 			continue
 		}
-		if fallback == "" {
-			fallback = name
+		if any == "" {
+			any = name
 		}
-		if deviceAPI == "alsa" && best == "" {
-			best = name
+		if state == "RUNNING" && running == "" {
+			running = name
 		}
-	}
-	if best != "" {
-		log.Printf("[rt] using ALSA sink: %s", best)
-		return best
-	}
-	if fallback != "" {
-		log.Printf("[rt] using first non-virtual sink: %s", fallback)
-		return fallback
-	}
-	return ""
-}
-
-func unloadAllVirtualSinks() {
-	out, err := exec.Command("pactl", "list", "modules").CombinedOutput()
-	if err != nil {
-		log.Printf("[rt] pactl list modules failed: %v", err)
-		return
-	}
-	count := 0
-	for _, l := range strings.Split(string(out), "\n") {
-		if strings.Contains(l, "module-null-sink") && strings.Contains(l, "zen-dsp-vsink") {
-			parts := strings.SplitN(l, ":", 2)
-			if len(parts) == 2 {
-				moduleID := strings.TrimSpace(parts[0])
-				log.Printf("[rt] unloading vsink module %s", moduleID)
-				exec.Command("pactl", "unload-module", moduleID).Run()
-				count++
-			}
+		if state == "IDLE" && idle == "" {
+			idle = name
 		}
 	}
-	if count > 0 {
-		log.Printf("[rt] unloaded %d stale vsink(s)", count)
+	if running != "" {
+		return running
 	}
-}
-
-func forceResumeSink(name string) {
-	log.Printf("[rt] force-resuming sink: %s", name)
-	out, err := exec.Command("pactl", "suspend-sink", name, "0").CombinedOutput()
-	if err != nil {
-		log.Printf("[rt] suspend-sink resume failed: %v\n%s", err, string(out))
+	if idle != "" {
+		return idle
 	}
-}
-
-func findDefaultSinkName() string {
-	out, err := exec.Command("pactl", "info").CombinedOutput()
-	if err != nil {
-		return ""
-	}
-	for _, l := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(l, "Default Sink:") {
-			return strings.TrimSpace(strings.TrimPrefix(l, "Default Sink:"))
-		}
-	}
-	return ""
-}
-
-func createVirtualSinkPactl() bool {
-	out, err := exec.Command("pactl", "load-module", "module-null-sink",
-		"sink_name=zen-dsp-vsink",
-		"sink_properties=node.description=Zen DSP Virtual Sink").CombinedOutput()
-	if err != nil {
-		log.Printf("[rt] pactl load-module failed: %v\n%s", err, string(out))
-		return false
-	}
-	log.Printf("[rt] pactl load-module output: %q", strings.TrimSpace(string(out)))
-	return true
-}
-
-func linkPorts(src, dst string) {
-	for i := 0; i < 5; i++ {
-		out, err := exec.Command("pw-link", src, dst).CombinedOutput()
-		msg := strings.TrimSpace(string(out))
-		if err != nil {
-			if strings.Contains(msg, "File exists") {
-				log.Printf("[rt] already linked: %s -> %s", src, dst)
-				return
-			}
-			log.Printf("[rt] link attempt %d: %s -> %s: %s", i+1, src, dst, msg)
-			time.Sleep(300 * time.Millisecond)
-			continue
-		}
-		log.Printf("[rt] linked: %s -> %s", src, dst)
-		return
-	}
-	log.Printf("[rt] FAILED to link %s -> %s", src, dst)
-}
-
-func linkFilterToSink(hwSink string) {
-	out, err := exec.Command("pw-link", "-i").Output()
-	if err != nil {
-		return
-	}
-	for _, l := range strings.Split(string(out), "\n") {
-		l = strings.TrimSpace(l)
-		if strings.Contains(l, hwSink) && strings.Contains(l, "playback") {
-			parts := strings.SplitN(l, ":", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			port := parts[1]
-			if strings.Contains(port, "FL") {
-				linkPorts("zen-dsp-eq:Output_FL", l)
-			} else if strings.Contains(port, "FR") {
-				linkPorts("zen-dsp-eq:Output_FR", l)
-			}
-		}
-	}
-}
-
-func setDefaultSink() {
-	exec.Command("pactl", "set-default-sink", "zen-dsp-vsink").Run()
-	log.Printf("[rt] default sink set to 'zen-dsp-vsink'")
+	return any
 }

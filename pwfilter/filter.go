@@ -4,10 +4,6 @@ package pwfilter
 #cgo pkg-config: libpipewire-0.3
 #include <pipewire/pipewire.h>
 #include <pipewire/filter.h>
-
-extern void goOnProcess(void *userdata, struct spa_io_position *position);
-extern void goOnStateChanged(void *userdata, enum pw_filter_state old,
-                              enum pw_filter_state state, char *error);
 */
 import "C"
 
@@ -44,26 +40,7 @@ func processAudio(inBufs, outBufs [NumChannels][]float32, n int) {
 		for c := range NumChannels {
 			copy(outBufs[c], inBufs[c])
 		}
-		if processCount <= 20 {
-			log.Printf("[dsp] curve=nil BYPASS")
-		}
 		return
-	}
-
-	if processCount <= 20 {
-		peakIn := float32(0)
-		for c := range NumChannels {
-			for i := range n {
-				if v := inBufs[c][i]; v < 0 {
-					if -v > peakIn {
-						peakIn = -v
-					}
-				} else if v > peakIn {
-					peakIn = v
-				}
-			}
-		}
-		log.Printf("[dsp] curve=ACTIVE bands[0]=%+v peakIn=%.6f", curve.Bands[0], peakIn)
 	}
 
 	for i := range n {
@@ -101,8 +78,7 @@ func filterStateName(s int) string {
 	}
 }
 
-//export goOnProcess
-func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
+func processNative(position *C.struct_spa_io_position) {
 	n := int(position.clock.duration)
 	if n == 0 {
 		return
@@ -116,9 +92,10 @@ func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
 	var inBufs, outBufs [NumChannels][]float32
 	allOK := true
 
+	// Port handles: 0=in_FL, 1=in_FR, 2=out_FL, 3=out_FR
 	for c := range NumChannels {
-		inPtr := C.pw_filter_get_dsp_buffer(inPorts[c], C.uint32_t(n))
-		outPtr := C.pw_filter_get_dsp_buffer(outPorts[c], C.uint32_t(n))
+		inPtr := C.pw_filter_get_dsp_buffer(C.zen_get_port(C.int(c)), C.uint32_t(n))
+		outPtr := C.pw_filter_get_dsp_buffer(C.zen_get_port(C.int(c+2)), C.uint32_t(n))
 		if inPtr == nil || outPtr == nil {
 			if processCount <= 20 {
 				log.Printf("[dsp] port %d nil ptr: in=%v out=%v", c, inPtr, outPtr)
@@ -131,7 +108,6 @@ func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
 	}
 
 	if !allOK {
-		// copy whatever we can for channels that have valid buffers
 		for c := range NumChannels {
 			if inBufs[c] != nil && outBufs[c] != nil {
 				copy(outBufs[c], inBufs[c])
@@ -143,12 +119,11 @@ func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
 	processAudio(inBufs, outBufs, n)
 }
 
-//export goOnStateChanged
-func goOnStateChanged(_ unsafe.Pointer, old, now C.enum_pw_filter_state, cerr *C.char) {
-	oldS := filterStateName(int(old))
-	newS := filterStateName(int(now))
+func stateChangedNative(old, now int, cerr *C.char) {
+	oldS := filterStateName(old)
+	newS := filterStateName(now)
 	LastState = newS
-	if now == C.PW_FILTER_STATE_ERROR {
+	if C.enum_pw_filter_state(now) == C.PW_FILTER_STATE_ERROR {
 		errMsg := C.GoString(cerr)
 		log.Printf("[dsp] STATE: %s -> %s error=%s", oldS, newS, errMsg)
 		select {
@@ -159,7 +134,7 @@ func goOnStateChanged(_ unsafe.Pointer, old, now C.enum_pw_filter_state, cerr *C
 		log.Printf("[dsp] STATE: %s -> %s", oldS, newS)
 	}
 	select {
-	case stateChangeCh <- filterState{old: int(old), now: int(now)}:
+	case stateChangeCh <- filterState{old: old, now: now}:
 	default:
 	}
 }
@@ -170,8 +145,6 @@ type filterState struct {
 }
 
 var (
-	inPorts  [NumChannels]unsafe.Pointer
-	outPorts [NumChannels]unsafe.Pointer
-	stateErrCh      = make(chan string, 1)
-	stateChangeCh   = make(chan filterState, 4)
+	stateErrCh    = make(chan string, 1)
+	stateChangeCh = make(chan filterState, 4)
 )
