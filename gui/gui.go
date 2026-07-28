@@ -39,8 +39,9 @@ type GUI struct {
 
 func New() *GUI {
 	g := &GUI{
-		win: new(app.Window),
-		th:  material.NewTheme(),
+		win:      new(app.Window),
+		th:       material.NewTheme(),
+		bypassed: true,
 	}
 	g.win.Option(app.Title("Zen DSP Equalizer"))
 	g.win.Option(app.Size(unit.Dp(520), unit.Dp(640)))
@@ -124,11 +125,14 @@ func (g *GUI) layout(gtx layout.Context) layout.Dimensions {
 }
 
 func (g *GUI) layoutSliders(gtx layout.Context) layout.Dimensions {
-	var dims layout.Dimensions
+	var children []layout.FlexChild
 	for i := range pwfilter.NumBands {
-		dims = g.layoutBand(gtx, i)
+		i := i
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return g.layoutBand(gtx, i)
+		}))
 	}
-	return dims
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
 func (g *GUI) layoutBand(gtx layout.Context, idx int) layout.Dimensions {
@@ -216,14 +220,14 @@ func (g *GUI) SetGains(gains [pwfilter.NumBands]float64) {
 	g.mu.Lock()
 	for i, v := range gains {
 		g.bands[i].gainDB = v
-		g.bands[i].slider.Value = float32(clamp((v+12)/24, 0, 1))
+		g.bands[i].slider.Value = float32(clamp((v+24)/48, 0, 1))
 	}
 	g.dirty = true
 	g.mu.Unlock()
 }
 
 func sliderToDB(v float32) float64 {
-	return 24*float64(v) - 12
+	return 48*float64(v) - 24
 }
 
 func dbLabel(db float64) string {
