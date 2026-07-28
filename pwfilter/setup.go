@@ -47,7 +47,12 @@ func SetupFilter() error {
 		return fmt.Errorf("pw_main_loop_new failed")
 	}
 
-	ps := str("media.type=Audio,media.category=Filter,media.role=Production,node.name=zen-dsp-eq,node.description=ZenDSPEqualizer")
+	ps := str("media.type=Audio,media.category=Filter,media.role=Production," +
+		"media.class=Audio/Sink," +
+		"node.name=zen-dsp-eq,node.description=ZenDSPEqualizer," +
+		"node.autoconnect=true," +
+		"factory.name=filter-chain," +
+		"audio.position=FL,FR")
 	props := C.pw_properties_new_string(ps)
 	C.free(unsafe.Pointer(ps))
 	if props == nil {
@@ -69,30 +74,37 @@ func SetupFilter() error {
 
 	mainLoop = ml
 
-	ips := str("format.dsp=float32,port.name=Input,audio.channels=2")
-	inProps := C.pw_properties_new_string(ips)
-	C.free(unsafe.Pointer(ips))
+	portLabels := []string{"FL", "FR"}
+	for c := range NumChannels {
+		ips := str("format.dsp=float32," +
+			"port.name=Input " + portLabels[c] + "," +
+			"audio.channels=1,audio.position=" + portLabels[c])
+		inProps := C.pw_properties_new_string(ips)
+		C.free(unsafe.Pointer(ips))
 
-	inPort = C.pw_filter_add_port(filter, C.PW_DIRECTION_INPUT,
-		C.PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-		0,
-		inProps,
-		nil, 0)
-	if inPort == nil {
-		return fmt.Errorf("pw_filter_add_port input failed")
-	}
+		inPorts[c] = C.pw_filter_add_port(filter, C.PW_DIRECTION_INPUT,
+			C.PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+			0,
+			inProps,
+			nil, 0)
+		if inPorts[c] == nil {
+			return fmt.Errorf("pw_filter_add_port input %d failed", c)
+		}
 
-	ops := str("format.dsp=float32,port.name=Output,audio.channels=2")
-	outProps := C.pw_properties_new_string(ops)
-	C.free(unsafe.Pointer(ops))
+		ops := str("format.dsp=float32," +
+			"port.name=Output " + portLabels[c] + "," +
+			"audio.channels=1,audio.position=" + portLabels[c])
+		outProps := C.pw_properties_new_string(ops)
+		C.free(unsafe.Pointer(ops))
 
-	outPort = C.pw_filter_add_port(filter, C.PW_DIRECTION_OUTPUT,
-		C.PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-		0,
-		outProps,
-		nil, 0)
-	if outPort == nil {
-		return fmt.Errorf("pw_filter_add_port output failed")
+		outPorts[c] = C.pw_filter_add_port(filter, C.PW_DIRECTION_OUTPUT,
+			C.PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+			0,
+			outProps,
+			nil, 0)
+		if outPorts[c] == nil {
+			return fmt.Errorf("pw_filter_add_port output %d failed", c)
+		}
 	}
 
 	ret := C.pw_filter_connect(filter,

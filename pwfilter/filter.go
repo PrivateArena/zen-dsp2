@@ -36,23 +36,18 @@ type runningState struct {
 
 var rt runningState
 
-func processAudio(in, out []float32) {
-	n := len(in) / NumChannels
-	if n == 0 {
-		return
-	}
-
+func processAudio(inBufs, outBufs [NumChannels][]float32, n int) {
 	curve := current.Load()
 	if curve == nil {
-		copy(out, in)
+		for c := range NumChannels {
+			copy(outBufs[c], inBufs[c])
+		}
 		return
 	}
 
-	var ch int
 	for i := range n {
 		for c := range NumChannels {
-			ch = i*NumChannels + c
-			y := in[ch]
+			y := inBufs[c][i]
 			for b := range curve.Bands {
 				coeff := &curve.Bands[b]
 				v := coeff.B0*y + rt.z1[c][b]
@@ -60,7 +55,7 @@ func processAudio(in, out []float32) {
 				rt.z2[c][b] = coeff.B2*y - coeff.A2*v
 				y = v
 			}
-			out[ch] = y
+			outBufs[c][i] = y
 		}
 	}
 }
@@ -68,17 +63,23 @@ func processAudio(in, out []float32) {
 //export goOnProcess
 func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
 	n := int(position.clock.duration)
-
-	inPtr := C.pw_filter_get_dsp_buffer(unsafe.Pointer(inPort), C.uint32_t(n))
-	outPtr := C.pw_filter_get_dsp_buffer(unsafe.Pointer(outPort), C.uint32_t(n))
-	if inPtr == nil || outPtr == nil {
+	if n == 0 {
 		return
 	}
 
-	in := unsafe.Slice((*float32)(inPtr), n*NumChannels)
-	out := unsafe.Slice((*float32)(outPtr), n*NumChannels)
+	var inBufs, outBufs [NumChannels][]float32
 
-	processAudio(in, out)
+	for c := range NumChannels {
+		inPtr := C.pw_filter_get_dsp_buffer(inPorts[c], C.uint32_t(n))
+		outPtr := C.pw_filter_get_dsp_buffer(outPorts[c], C.uint32_t(n))
+		if inPtr == nil || outPtr == nil {
+			return
+		}
+		inBufs[c] = unsafe.Slice((*float32)(inPtr), n)
+		outBufs[c] = unsafe.Slice((*float32)(outPtr), n)
+	}
+
+	processAudio(inBufs, outBufs, n)
 }
 
 //export goOnStateChanged
@@ -101,7 +102,8 @@ type filterState struct {
 }
 
 var (
-	inPort, outPort unsafe.Pointer
+	inPorts  [NumChannels]unsafe.Pointer
+	outPorts [NumChannels]unsafe.Pointer
 	stateErrCh      = make(chan string, 1)
 	stateChangeCh   = make(chan filterState, 4)
 )
