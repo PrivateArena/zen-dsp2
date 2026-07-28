@@ -2,8 +2,7 @@ package pwfilter
 
 /*
 #cgo pkg-config: libpipewire-0.3
-#include <pipewire/pipewire.h>
-#include <pipewire/filter.h>
+#include "pw_helpers.h"
 */
 import "C"
 
@@ -92,7 +91,6 @@ func processNative(position *C.struct_spa_io_position) {
 	var inBufs, outBufs [NumChannels][]float32
 	allOK := true
 
-	// Port handles: 0=in_FL, 1=in_FR, 2=out_FL, 3=out_FR
 	for c := range NumChannels {
 		inPtr := C.pw_filter_get_dsp_buffer(C.zen_get_port(C.int(c)), C.uint32_t(n))
 		outPtr := C.pw_filter_get_dsp_buffer(C.zen_get_port(C.int(c+2)), C.uint32_t(n))
@@ -137,6 +135,16 @@ func stateChangedNative(old, now int, cerr *C.char) {
 	case stateChangeCh <- filterState{old: old, now: now}:
 	default:
 	}
+}
+
+//export goOnProcess
+func goOnProcess(_ unsafe.Pointer, position *C.struct_spa_io_position) {
+	processNative(position)
+}
+
+//export goOnStateChanged
+func goOnStateChanged(_ unsafe.Pointer, old, now C.enum_pw_filter_state, cerr *C.char) {
+	stateChangedNative(int(old), int(now), cerr)
 }
 
 type filterState struct {

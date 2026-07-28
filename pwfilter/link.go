@@ -2,23 +2,24 @@ package pwfilter
 
 /*
 #cgo pkg-config: libpipewire-0.3
-#include <pipewire/pipewire.h>
+#include "pw_helpers.h"
 */
 import "C"
 
 import (
 	"log"
+	"os/exec"
 	"strings"
 	"time"
 )
 
+var filterNodeID uint32
 var sinkNodeID uint32
 var sinkNodeSerial uint64
 
 func SetupRouting() {
 	time.Sleep(1 * time.Second)
 
-	// 1. Wait for our null sink (zen-dsp-sink)
 	waitForNode("zen-dsp-sink")
 	sink, ok := findNodeByName("zen-dsp-sink")
 	if !ok {
@@ -29,7 +30,6 @@ func SetupRouting() {
 	sinkNodeSerial = sink.serial
 	log.Printf("[rt] found null sink: id=%d serial=%d", sinkNodeID, sinkNodeSerial)
 
-	// 2. Find hardware sink (prefer RUNNING via pactl, fallback to registry)
 	hwName := findHardwareSinkPactl()
 	if hwName == "" {
 		log.Printf("[rt] no hardware sink found via pactl, trying registry")
@@ -47,7 +47,6 @@ func SetupRouting() {
 	}
 	log.Printf("[rt] hardware sink: %s", hwName)
 
-	// Wait for hw sink node to appear
 	waitForNode(hwName)
 	hw, ok := findNodeByName(hwName)
 	if !ok {
@@ -56,7 +55,6 @@ func SetupRouting() {
 	}
 	log.Printf("[rt] found hw sink: id=%d serial=%d", hw.id, hw.serial)
 
-	// 3. Wait for filter node zen-dsp-eq
 	waitForNode("zen-dsp-eq")
 	filter, ok := findNodeByName("zen-dsp-eq")
 	if !ok {
@@ -65,20 +63,19 @@ func SetupRouting() {
 	}
 	log.Printf("[rt] found filter: id=%d serial=%d", filter.id, filter.serial)
 
-	// 4. Link null_sink -> filter -> hw_sink (JamesDSP style)
-	log.Printf("[rt] linking %s(id=%d) -> %s(id=%d)", "zen-dsp-sink", sink.id, "zen-dsp-eq", filter.id)
+	// Link null_sink -> filter
+	log.Printf("[rt] linking zen-dsp-sink(id=%d) -> zen-dsp-eq(id=%d)", sink.id, filter.id)
 	time.Sleep(300 * time.Millisecond)
 	linkRet := int(C.zen_link_nodes_by_id(C.uint32_t(sink.id), C.uint32_t(filter.id)))
 	log.Printf("[rt] null_sink -> filter: %d links", linkRet)
 
 	time.Sleep(500 * time.Millisecond)
 
-	log.Printf("[rt] linking %s(id=%d) -> %s(id=%d)", "zen-dsp-eq", filter.id, hwName, hw.id)
+	// Link filter -> hw_sink
+	log.Printf("[rt] linking zen-dsp-eq(id=%d) -> %s(id=%d)", filter.id, hwName, hw.id)
 	linkRet = int(C.zen_link_nodes_by_id(C.uint32_t(filter.id), C.uint32_t(hw.id)))
 	log.Printf("[rt] filter -> hw_sink: %d links", linkRet)
 
-	// 5. Route output streams to null sink via metadata
-	// Monitor for new streams and route them
 	time.Sleep(500 * time.Millisecond)
 	go routeStreamsLoop()
 }
@@ -94,7 +91,6 @@ func waitForNode(name string) {
 }
 
 func routeStreamsLoop() {
-	// Periodically check for unrouted Output streams and route them to our sink
 	routed := make(map[uint32]bool)
 	for {
 		time.Sleep(2 * time.Second)
@@ -176,4 +172,9 @@ func findHardwareSinkPactl() string {
 		return idle
 	}
 	return any
+}
+
+func run(cmd string, args ...string) (string, error) {
+	out, err := exec.Command(cmd, args...).CombinedOutput()
+	return string(out), err
 }
